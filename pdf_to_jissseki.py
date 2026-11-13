@@ -70,53 +70,97 @@ def process_files():
             # 枚中の単語の前にある数字最大2桁を抽出（年抽出）
             wareki_pattern = re.compile(r'(\d{1,2})\s*枚中')
             wareki_matches = wareki_pattern.findall(content)
-            
-            # 数字の単語があった場合で、その次の単語が月火水木金を抽出（日付と曜日抽出）
-            pattern1 = re.compile(r'(\d+)\s+([月火水木金])')
-            matches1 = pattern1.findall(content)
-            
-            # 数字と月火水木金が合体している場合も抽出（日付と曜日例外用）
-            pattern2 = re.compile(r'(\d+)([月火水木金])')
-            matches2 = pattern2.findall(content)
 
-            # :マークの前後にある数字最大2桁の項目を抽出（出退勤の時間抽出）
-            colon_pattern = re.compile(r'(\d{1,2}):(\d{1,2})')
-            colon_matches = colon_pattern.findall(content)
+            # 受給者証番号の10桁を抽出（"施設外\n支援"の直後に出現する）
+            jukyusha_pattern = re.compile(r'支援(\d{10})')
+            jukyusha_matches = jukyusha_pattern.findall(content)
 
-            # 出退勤の項目数が奇数の場合はエラーメッセージを追加して次に進む
-            # 出勤か退勤どちらかが無い場合項目数が奇数の可能性が高いので弾く
-            if len(colon_matches) % 2 != 0:
-                error_messages.append(f"{shien_combined}さんはpdf内の出退勤情報にエラーがあります")
+            # 契約支給量を抽出（"はっぴぃたいむ"の前の文字列）
+            keiyaku_pattern = re.compile(r'(就労継続支援\s+Ｂ型\s+.+?)\s+はっぴぃたいむ')
+            keiyaku_matches = keiyaku_pattern.findall(content)
+
+            # 日付・曜日・出退勤時間・送迎加算を一括抽出
+            # 送迎加算ありの場合: 日 曜日 HH:MM HH:MM 1 1
+            # 送迎加算なしの場合: 日 曜日 HH:MM HH:MM
+            record_pattern = re.compile(
+                r'(\d{1,2})\s*([月火水木金土])\s+'
+                r'(\d{1,2}):(\d{1,2})\s+'
+                r'(\d{1,2}):(\d{1,2})'
+                r'(?:\s+(\d)\s+(\d))?'
+            )
+            records = record_pattern.findall(content)
+
+            if not records:
+                error_messages.append(f"{shien_combined}さんのpdf内に出退勤データが見つかりません")
                 continue
 
-            #送迎加算情報取り出し
-            esc_pattern = re.compile(r'(\d{1,2}):(\d{1,2})\s+(\d{1,2}):(\d{1,2})(?:\s+(\d+))?')
-            esc_matches = esc_pattern.findall(content)
+            # PDFの和暦から西暦と月を算出
+            seireki = int(wareki_matches[0]) + 2018
+            month = int(nengetsu_matches[0])
 
-            #抽出した氏名で指定フォルダ内のエクセルファイル検索
-            excel_files = [f for f in os.listdir(excel_folder) if os.path.isfile(os.path.join(excel_folder, f)) and shien_combined in f]
+            if month == 1:
+                # 1月処理: まず当年ファイルがあるか確認（再処理の場合）
+                excel_files = [f for f in os.listdir(excel_folder) if os.path.isfile(os.path.join(excel_folder, f)) and shien_combined in f and str(seireki) in f]
 
-            # PDFに氏名があり、エクセルが無い新規の人は新規用テンプレからまずエクセル作成
-            if not excel_files:
-                # 新規用テンプレートエクセルを選択
-                template_filename = os.path.join(excel_folder, '新規用.xlsx')
-                
-                #該当氏名エクセルファイルが存在しない、新規用.xlsxもフォルダに無い場合はエラーを追加して次へ
-                if not os.path.isfile(template_filename):
-                    error_messages.append(f"{shien_combined}さんのエクセルが存在しません。新規用テンプレートも存在しません。")
-                    continue
+                if excel_files:
+                    filename = excel_files[0]
+                    filepath = os.path.join(excel_folder, filename)
+                    wb = load_workbook(filepath)
+                else:
+                    # 前年のファイルを探す
+                    prev_seireki = seireki - 1
+                    prev_files = [f for f in os.listdir(excel_folder) if os.path.isfile(os.path.join(excel_folder, f)) and shien_combined in f and str(prev_seireki) in f]
 
-                wb = load_workbook(template_filename)
+                    if prev_files:
+                        # 前年ファイルを新年にリネーム
+                        old_filepath = os.path.join(excel_folder, prev_files[0])
+                        filename = f'実績{seireki}_{shien_combined}.xlsx'
+                        filepath = os.path.join(excel_folder, filename)
+                        os.rename(old_filepath, filepath)
+                        wb = load_workbook(filepath)
 
-                # 新規の人の名前のエクセルファイルを作成してデータ処理
-                filename = '実績_' + shien_combined + '.xlsx'
-                filepath = os.path.join(excel_folder, filename)
-
-            #既存ファイルがある継続通所の人はエクセルファイルをロードのみ
+                        # 就労継続支援シート以外を全て削除
+                        for sheet_name in wb.sheetnames:
+                            if sheet_name != '就労継続支援':
+                                del wb[sheet_name]
+                    else:
+                        # 前年ファイルもない新規の人
+                        template_filename = os.path.join(excel_folder, '新規用.xlsx')
+                        if not os.path.isfile(template_filename):
+                            error_messages.append(f"{shien_combined}さんのエクセルが存在しません。新規用テンプレートも存在しません。")
+                            continue
+                        wb = load_workbook(template_filename)
+                        wb['就労継続支援']['AD3'] = shien_combined
+                        if jukyusha_matches:
+                            for i, digit in enumerate(jukyusha_matches[0]):
+                                wb['就労継続支援'].cell(row=3, column=9 + i, value=int(digit))
+                        if keiyaku_matches:
+                            wb['就労継続支援']['I5'] = keiyaku_matches[0]
+                        filename = f'実績{seireki}_{shien_combined}.xlsx'
+                        filepath = os.path.join(excel_folder, filename)
             else:
-                filename = excel_files[0]
-                filepath = os.path.join(excel_folder, filename)
-                wb = load_workbook(filepath)
+                # 2月～12月: 当年のファイルを探す
+                excel_files = [f for f in os.listdir(excel_folder) if os.path.isfile(os.path.join(excel_folder, f)) and shien_combined in f and str(seireki) in f]
+
+                if not excel_files:
+                    # 当年ファイルがない新規の人
+                    template_filename = os.path.join(excel_folder, '新規用.xlsx')
+                    if not os.path.isfile(template_filename):
+                        error_messages.append(f"{shien_combined}さんの{seireki}年のエクセルが存在しません。新規用テンプレートも存在しません。")
+                        continue
+                    wb = load_workbook(template_filename)
+                    wb['就労継続支援']['AD3'] = shien_combined
+                    if jukyusha_matches:
+                        for i, digit in enumerate(jukyusha_matches[0]):
+                            wb['就労継続支援'].cell(row=3, column=9 + i, value=int(digit))
+                    if keiyaku_matches:
+                        wb['就労継続支援']['I5'] = keiyaku_matches[0]
+                    filename = f'実績{seireki}_{shien_combined}.xlsx'
+                    filepath = os.path.join(excel_folder, filename)
+                else:
+                    filename = excel_files[0]
+                    filepath = os.path.join(excel_folder, filename)
+                    wb = load_workbook(filepath)
 
             # コピー元のシートを取得する
             source_sheet = wb['就労継続支援']
@@ -135,72 +179,58 @@ def process_files():
             new_sheet['D2'] = f"令和{wareki_matches[0]}年"
             new_sheet['L2'] = int(nengetsu_matches[0])
 
-            # 出勤日をC11セルから、曜日をF11セルから、縦に書き込む
-            for idx, (day, weekday) in enumerate(matches1 + matches2):
-                new_sheet.cell(row=11 + idx, column=3, value=int(day))
-                new_sheet.cell(row=11 + idx, column=6, value=weekday)
-
             # 勤務時間合計を計算するための変数
             total_working_hours = 0
 
             # BD2セルに値があるかチェック（休憩時間計算の例外チェック）
             has_break_exception = new_sheet['BD2'].value is not None
 
-            # 取得しておいた出勤時間をN11から、退勤時間をS11から、2列にわけて時刻型で書き込む
-            for i in range(0, len(colon_matches), 2):
-                row_idx = 11 + (i // 2)
-                
-                # 出勤時間を設定
-                cell_n = new_sheet.cell(row=row_idx, column=14)
-                start_time = time(int(colon_matches[i][0]), int(colon_matches[i][1]))
+            # 各レコードのデータを書き込む（日付・曜日・出退勤時間・送迎加算）
+            for idx, (day, weekday, sh, sm, eh, em, esc1, esc2) in enumerate(records):
+                row = 11 + idx
+
+                # 出勤日をC列、曜日をF列に書き込む
+                new_sheet.cell(row=row, column=3, value=int(day))
+                new_sheet.cell(row=row, column=6, value=weekday)
+
+                # 出勤時間をN列に書き込む
+                cell_n = new_sheet.cell(row=row, column=14)
+                start_time = time(int(sh), int(sm))
                 cell_n.value = start_time
                 cell_n.number_format = 'HH:MM'
-                
-                # 退勤時間を設定
-                if i + 1 < len(colon_matches):
-                    cell_s = new_sheet.cell(row=row_idx, column=19)
-                    end_time = time(int(colon_matches[i + 1][0]), int(colon_matches[i + 1][1]))
-                    cell_s.value = end_time
-                    cell_s.number_format = 'HH:MM'
-                    
-                    # 勤務時間を計算
-                    # 時間を分単位で計算
-                    start_minutes = start_time.hour * 60 + start_time.minute
-                    end_minutes = end_time.hour * 60 + end_time.minute
-                    
-                    # 時間差を分単位で計算
-                    diff_minutes = end_minutes - start_minutes
-                    
-                    # 休憩時間の処理
-                    # BD2に書き込みがない場合で11:30以前の出勤かつ12:30以降の退勤の場合は1時間差し引く
-                    if not has_break_exception:
-                        break_start = 11 * 60 + 30  # 11:30 を分単位で表現
-                        break_end = 12 * 60 + 30    # 12:30 を分単位で表現
-                        
-                        if start_minutes <= break_start and end_minutes >= break_end:
-                            diff_minutes -= 60  # 1時間(60分)の休憩時間を引く
-                    
-                    # 分を時間に変換
-                    hours_diff = diff_minutes / 60
-                    
-                    # 15分刻みで切り上げる処理
-                    # 例: 5.18時間 → 5.25時間に調整
-                    quarter_hours = round(hours_diff * 4) / 4
-                    
-                    # 勤務時間を合計に加算
-                    total_working_hours += quarter_hours
-            
+
+                # 退勤時間をS列に書き込む
+                cell_s = new_sheet.cell(row=row, column=19)
+                end_time = time(int(eh), int(em))
+                cell_s.value = end_time
+                cell_s.number_format = 'HH:MM'
+
+                # 送迎加算があればX列とZ列に書き込む
+                if esc1:
+                    new_sheet.cell(row=row, column=24, value=int(esc1))
+                if esc2:
+                    new_sheet.cell(row=row, column=26, value=int(esc2))
+
+                # 勤務時間を計算
+                start_minutes = start_time.hour * 60 + start_time.minute
+                end_minutes = end_time.hour * 60 + end_time.minute
+                diff_minutes = end_minutes - start_minutes
+
+                # 休憩時間の処理
+                if not has_break_exception:
+                    break_start = 11 * 60 + 30
+                    break_end = 12 * 60 + 30
+                    if start_minutes <= break_start and end_minutes >= break_end:
+                        diff_minutes -= 60
+
+                hours_diff = diff_minutes / 60
+                quarter_hours = round(hours_diff * 4) / 4
+                total_working_hours += quarter_hours
+
             # 合計勤務時間をR41に書き込む
             cell_total = new_sheet.cell(row=41, column=18)
             cell_total.value = total_working_hours
-            cell_total.number_format = '0.00'  # 小数点以下2桁で表示
-            
-            # 書き込みが終わったらエクセルファイルを保存する
-            wb.save(filepath)
-
-            # 進捗バーを更新
-            progress_bar['value'] += 1
-            root.update_idletasks()
+            cell_total.number_format = '0.00'
             
             # 書き込みが終わったらエクセルファイルを保存する
             wb.save(filepath)
@@ -238,10 +268,6 @@ notice.pack()
 notice = tk.Label(root, text="エクセル側のファイル名はスペースがある場合削除してください。")
 notice.pack()
 notice = tk.Label(root, text="pdf内の名前とエクセルファイルの名前に不一致やスペースがあったりすると、新規扱いになります")
-notice.pack()
-notice = tk.Label(root, text="新規の人はファイル名に西暦、ファイル内に名前、受給者番号などを処理完了後入れて下さい。")
-notice.pack()
-notice = tk.Label(root, text="送迎加算には対応していないので、加算部分だけ手入力でお願いします")
 notice.pack()
 
 # PDF選択ボタン、pdf関数呼び出し
